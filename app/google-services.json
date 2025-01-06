@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "729725795832",
+    "project_id": "aiproject-2c1bd",
+    "storage_bucket": "aiproject-2c1bd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:729725795832:android:8795fa9dd731af26b3ea0d",
+        "android_client_info": {
+          "package_name": "com.mertadali.speechwithai_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1Uo_JQisGp0LqqYB_t4fLtFh_XIAUbvw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
