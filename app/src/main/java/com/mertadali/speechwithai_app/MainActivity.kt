@@ -36,6 +36,7 @@ import android.content.Intent
 import androidx.core.app.ActivityCompat
 import com.mertadali.speechwithai_app.repository.ConversationData
 import com.mertadali.speechwithai_app.service.AssistantMessage
+import com.mertadali.speechwithai_app.service.RunRequest
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -53,7 +54,6 @@ class MainActivity : ComponentActivity() {
     // Sabit thread ID tanımlayalım
     companion object {
         private const val THREAD_ID = "thread_7kL9XyPVBGJHutAFZGgcKqWx" // OpenAI'dan aldığınız thread ID
-        private const val PERMISSION_REQUEST_CODE = 1234
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -154,24 +154,12 @@ class MainActivity : ComponentActivity() {
                     // Ses -> Metin
                     val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
                     val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
-
                     val transcriptionResponse = chatGPTService.getTranscription(body)
 
-                    // Rate limiting için bekle
-                    delay(2000)
-
-                    // Mesajı gönder
-                    val message = AssistantMessage(content = transcriptionResponse.text)
-                    val messageResponse = chatGPTService.sendMessage(
-                        threadId = THREAD_ID,
-                        message = message
-                    )
+                    // Assistant yanıtı al
+                    val aiResponse = processAssistantResponse(THREAD_ID, transcriptionResponse.text)
 
                     withContext(Dispatchers.Main) {
-                        val aiResponse = messageResponse.content
-                            .firstOrNull { it.type == "text" }
-                            ?.text?.value ?: "Yanıt alınamadı"
-
                         // Sesli yanıt ver
                         textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
 
@@ -243,6 +231,37 @@ class MainActivity : ComponentActivity() {
         textToSpeech.shutdown()
         audioRecorder.stopRecording()
     }
+
+    private suspend fun processAssistantResponse(threadId: String, userMessage: String): String {
+        return try {
+            // Mesajı gönder
+            chatGPTService.sendMessage(
+                threadId = threadId,
+                message = AssistantMessage(content = userMessage)
+            )
+
+            // Run başlat
+            val runResponse = chatGPTService.createRun(
+                threadId = threadId,
+                RunRequest()
+            )
+
+            // Run durumunu kontrol et
+            var status = runResponse.status
+            while (status != "completed") {
+                delay(1000)
+                status = chatGPTService.getRunStatus(threadId, runResponse.id).status
+                if (status == "failed") throw Exception("Assistant yanıt veremedi")
+            }
+
+            // Son mesajı al
+            chatGPTService.getMessages(threadId).data
+                .firstOrNull()?.content
+                ?.firstOrNull()?.text?.value
+                ?: "Yanıt alınamadı"
+
+        } catch (e: Exception) {
+            "Hata: ${e.message}"
+        }
+    }
 }
-
-

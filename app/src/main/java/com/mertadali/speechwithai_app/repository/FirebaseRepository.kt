@@ -86,4 +86,3 @@ data class ConversationData(
         "timestamp" to timestamp
     )
 }
-
