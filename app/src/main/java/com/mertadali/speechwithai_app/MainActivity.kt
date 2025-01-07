@@ -34,8 +34,11 @@ import android.speech.tts.TextToSpeech
 import java.util.Locale
 import android.content.Intent
 import androidx.core.app.ActivityCompat
-import com.mertadali.speechwithai_app.service.ChatGPTRequest
-import com.mertadali.speechwithai_app.service.Message
+import com.mertadali.speechwithai_app.repository.ConversationData
+import com.mertadali.speechwithai_app.service.AssistantMessage
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 
 class MainActivity : ComponentActivity() {
@@ -43,22 +46,24 @@ class MainActivity : ComponentActivity() {
     private val audioRecorder = AudioRecorder()
     private val firebaseRepository = FirebaseRepository()
     private var currentRecordingFile: File? = null
-    private val chatGPTService = ChatGPTService.create()
+    private val chatGPTService by lazy { ChatGPTService.create() }
     private lateinit var textToSpeech: TextToSpeech
+    private var isProcessing = false
+
+    // Sabit thread ID tanımlayalım
+    companion object {
+        private const val THREAD_ID = "thread_7kL9XyPVBGJHutAFZGgcKqWx" // OpenAI'dan aldığınız thread ID
+        private const val PERMISSION_REQUEST_CODE = 1234
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        initTextToSpeech()
+        // Google Play Services kontrolü
+        checkGooglePlayServices()
 
-        // Örnek stokları ekle
-        lifecycleScope.launch {
-            try {
-                firebaseRepository.addInitialStocks()
-            } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, "Stok verisi yüklenemedi", Toast.LENGTH_SHORT).show()
-            }
-        }
+        initTextToSpeech()
+        initializeFirebase()
 
         setContent {
             SpeechWithAI_AppTheme {
@@ -75,18 +80,25 @@ class MainActivity : ComponentActivity() {
 
                         Button(
                             onClick = {
-                                if (isRecording) {
-                                    stopRecordingAndProcess()
-                                    isRecording = false
-                                } else {
-                                    startRecording()
-                                    isRecording = true
+                                if (!isProcessing) {
+                                    if (isRecording) {
+                                        stopRecordingAndProcess()
+                                        isRecording = false
+                                    } else {
+                                        startRecording()
+                                        isRecording = true
+                                    }
                                 }
                             },
+                            enabled = !isProcessing,
                             modifier = Modifier.padding(16.dp)
                         ) {
                             Text(
-                                text = if (isRecording) "Dinlemeyi Durdur" else "Soru Sormak İçin Başlat",
+                                text = when {
+                                    isProcessing -> "İşleniyor..."
+                                    isRecording -> "Dinlemeyi Durdur"
+                                    else -> "Soru Sormak İçin Başlat"
+                                },
                                 modifier = Modifier.padding(8.dp)
                             )
                         }
@@ -132,57 +144,58 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopRecordingAndProcess() {
+        if (isProcessing) return
+        isProcessing = true
         audioRecorder.stopRecording()
-        Toast.makeText(this, "Ses kaydı tamamlandı, işleniyor...", Toast.LENGTH_SHORT).show()
 
         currentRecordingFile?.let { file ->
-            lifecycleScope.launch {
+            lifecycleScope.launch(Dispatchers.IO) {
                 try {
                     // Ses -> Metin
                     val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
                     val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
+
                     val transcriptionResponse = chatGPTService.getTranscription(body)
 
-                    // Stok bilgisini kontrol et
-                    val query = transcriptionResponse.text
-                    val stockInfo = when {
-                        query.contains("a çikolata", ignoreCase = true) ->
-                            firebaseRepository.getStockInfo("A çikolatası")
-                        query.contains("b çikolata", ignoreCase = true) ->
-                            firebaseRepository.getStockInfo("B çikolatası")
-                        else -> null
-                    }
+                    // Rate limiting için bekle
+                    delay(2000)
 
-                    // AI yanıtı al
-                    val chatResponse = chatGPTService.getChatResponse(
-                        ChatGPTRequest(
-                            messages = listOf(
-                                Message("system", ChatGPTService.SYSTEM_PROMPT),
-                                Message("user", query),
-                                Message(
-                                    "system",
-                                    "Stok bilgisi: ${stockInfo?.toString() ?: "Ürün bulunamadı"}"
-                                )
-                            )
-                        )
+                    // Mesajı gönder
+                    val message = AssistantMessage(content = transcriptionResponse.text)
+                    val messageResponse = chatGPTService.sendMessage(
+                        threadId = THREAD_ID,
+                        message = message
                     )
 
-                    val aiResponse = chatResponse.choices.firstOrNull()?.message?.content ?: "Yanıt alınamadı"
+                    withContext(Dispatchers.Main) {
+                        val aiResponse = messageResponse.content
+                            .firstOrNull { it.type == "text" }
+                            ?.text?.value ?: "Yanıt alınamadı"
 
-                    // Yanıtı göster ve seslendir
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, aiResponse, Toast.LENGTH_LONG).show()
+                        // Sesli yanıt ver
+                        textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+
+                        // Firebase'e kaydet
+                        firebaseRepository.saveConversation(
+                            ConversationData(
+                                query = transcriptionResponse.text,
+                                response = aiResponse
+                            )
+                        )
                     }
-                    textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
-
-                    // Kaydet
-                    firebaseRepository.saveConversation(query, aiResponse)
 
                     file.delete()
                 } catch (e: Exception) {
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, "Hata: ${e.message}", Toast.LENGTH_SHORT).show()
+                    e.printStackTrace()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Hata: ${e.message}",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
+                } finally {
+                    isProcessing = false
                 }
             }
         }
@@ -202,6 +215,26 @@ class MainActivity : ComponentActivity() {
                 1234
             )
             false
+        }
+    }
+
+    private fun checkGooglePlayServices() {
+        val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+        val resultCode = availability.isGooglePlayServicesAvailable(this)
+        if (resultCode != com.google.android.gms.common.ConnectionResult.SUCCESS) {
+            availability.getErrorDialog(this, resultCode, 1)?.show()
+        }
+    }
+
+    private fun initializeFirebase() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                firebaseRepository.initializeStocks()
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@MainActivity, "Stok verisi yüklenemedi", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 

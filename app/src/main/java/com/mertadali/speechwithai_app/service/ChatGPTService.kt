@@ -8,12 +8,15 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.Part
-import retrofit2.http.Header
 import okhttp3.RequestBody
-import okhttp3.MediaType
 import retrofit2.http.Body
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import retrofit2.http.GET
+import retrofit2.http.Path
+import java.util.concurrent.TimeUnit
+import okhttp3.logging.HttpLoggingInterceptor
+import kotlin.math.pow
 
 interface ChatGPTService {
     @Multipart
@@ -21,57 +24,94 @@ interface ChatGPTService {
     suspend fun getTranscription(
         @Part file: MultipartBody.Part,
         @Part("model") model: RequestBody = "whisper-1".toRequestBody("text/plain".toMediaType())
-    ): ChatGPTResponse
+    ): TranscriptionResponse
 
-    @POST("v1/chat/completions")
-    suspend fun getChatResponse(
-        @Body request: ChatGPTRequest
-    ): ChatCompletionResponse
+    @POST("v1/threads/{thread_id}/messages")
+    suspend fun sendMessage(
+        @Path("thread_id") threadId: String,
+        @Body message: AssistantMessage
+    ): MessageResponse
+
+    @GET("v1/threads/{thread_id}/runs/{run_id}")
+    suspend fun getRunStatus(
+        @Path("thread_id") threadId: String,
+        @Path("run_id") runId: String
+    ): RunResponse
 
     companion object {
-        const val SYSTEM_PROMPT = """
-            Sen bir çikolata mağazasının stok kontrol görevlisisin. Görevlerin:
-            1. Sorulan çikolata ürününün stok durumunu kontrol et
-            2. Net ve anlaşılır cevaplar ver
-            3. Eğer ürün stokta varsa: "[Ürün adı]: [miktar] adet mevcut" formatında yanıt ver
-            4. Eğer ürün stokta yoksa: "[Ürün adı] şu anda stokta bulunmuyor" şeklinde yanıt ver
-            5. Eğer ürün sistemde yoksa: "Bu ürün bilgisi sistemde bulunmuyor" şeklinde yanıt ver
-            6. Sadece stok bilgisi ver, başka konulara girme
-            
-            Örnek yanıtlar:
-            - "A çikolatası: 15 adet mevcut"
-            - "B çikolatası şu anda stokta bulunmuyor"
-            - "Bu ürün bilgisi sistemde bulunmuyor"
-        """
+        const val ASSISTANT_ID = "asst_ObhY59Uzf80z3SftkBgNDrwx"
+        private var instance: ChatGPTService? = null
 
+        @Synchronized
         fun create(): ChatGPTService {
-            val client = OkHttpClient.Builder()
-                .addInterceptor { chain ->
-                    chain.proceed(
-                        chain.request().newBuilder()
-                            .header("Authorization", "Bearer ${Constans.API_KEY}")
-                            .build()
-                    )
+            if (instance == null) {
+                val loggingInterceptor = HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.BODY
                 }
-                .build()
 
-            return Retrofit.Builder()
-                .baseUrl("https://api.openai.com/")
-                .addConverterFactory(GsonConverterFactory.create())
-                .client(client)
-                .build()
-                .create(ChatGPTService::class.java)
+                val client = OkHttpClient.Builder()
+                    .addInterceptor(loggingInterceptor)
+                    .addInterceptor { chain ->
+                        val original = chain.request()
+                        val request = original.newBuilder()
+                            .header("Authorization", "Bearer ${Constans.API_KEY}")
+                            .header("OpenAI-Beta", "assistants=v1")
+                            .build()
+
+                        var response = chain.proceed(request)
+                        var retryCount = 0
+
+                        while (!response.isSuccessful && response.code == 429 && retryCount < 3) {
+                            response.close()
+                            retryCount++
+                            Thread.sleep(1000L * (2.0.pow(retryCount.toDouble())).toLong())
+                            response = chain.proceed(request)
+                        }
+
+                        response
+                    }
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
+                    .build()
+
+                instance = Retrofit.Builder()
+                    .baseUrl("https://api.openai.com/")
+                    .addConverterFactory(GsonConverterFactory.create())
+                    .client(client)
+                    .build()
+                    .create(ChatGPTService::class.java)
+            }
+            return instance!!
         }
     }
 }
 
-data class ChatGPTRequest(
-    val model: String = "gpt-3.5-turbo",
-    val messages: List<Message>,
-    val temperature: Double = 0.3  // Daha tutarlı yanıtlar için
+data class AssistantMessage(
+    val role: String = "user",
+    val content: String
 )
 
-data class Message(val role: String, val content: String)
-data class ChatGPTResponse(val text: String)
-data class ChatCompletionResponse(val choices: List<Choice>)
-data class Choice(val message: Message)
+data class MessageResponse(
+    val id: String,
+    val thread_id: String,
+    val content: List<MessageContent>
+)
+
+data class MessageContent(
+    val type: String,
+    val text: TextContent
+)
+
+data class TextContent(
+    val value: String
+)
+
+data class RunResponse(
+    val id: String,
+    val status: String
+)
+
+data class TranscriptionResponse(
+    val text: String
+)

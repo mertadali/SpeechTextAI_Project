@@ -8,32 +8,32 @@ import kotlinx.coroutines.withContext
 class FirebaseRepository {
     private val database = FirebaseFirestore.getInstance()
 
-    // Stok sorgulama
-    suspend fun getStockInfo(productName: String): Map<String, Any>? {
+    suspend fun getStockInfo(productName: String): StockInfo? {
         return withContext(Dispatchers.IO) {
             try {
-                val snapshot = database.collection("chocolate_stocks")
-                    .whereEqualTo("name", productName)
+                val snapshot = database.collection("stocks")
+                    .whereEqualTo("name", productName.lowercase())
                     .get()
                     .await()
-                snapshot.documents.firstOrNull()?.data
+
+                snapshot.documents.firstOrNull()?.let { doc ->
+                    StockInfo(
+                        name = doc.getString("name") ?: "",
+                        quantity = doc.getLong("quantity")?.toInt() ?: 0,
+                        unit = doc.getString("unit") ?: "adet"
+                    )
+                }
             } catch (e: Exception) {
                 null
             }
         }
     }
 
-    // Konuşma ve yanıtları kaydetme
-    suspend fun saveConversation(query: String, response: String): Result<String> {
+    suspend fun saveConversation(conversation: ConversationData): Result<String> {
         return withContext(Dispatchers.IO) {
             try {
-                val data = mapOf(
-                    "query" to query,
-                    "response" to response,
-                    "timestamp" to System.currentTimeMillis()
-                )
                 val documentRef = database.collection("conversations")
-                    .add(data)
+                    .add(conversation.toMap())
                     .await()
                 Result.success(documentRef.id)
             } catch (e: Exception) {
@@ -42,23 +42,48 @@ class FirebaseRepository {
         }
     }
 
-    // Örnek stok verilerini ekleme
-    suspend fun addInitialStocks() {
+    suspend fun initializeStocks() {
         val stocks = listOf(
-            mapOf(
-                "name" to "A çikolatası",
-                "quantity" to 15,
-                "unit" to "adet"
-            ),
-            mapOf(
-                "name" to "B çikolatası",
-                "quantity" to 20,
-                "unit" to "adet"
-            )
+            StockInfo("a çikolatası", 15, "adet"),
+            StockInfo("b çikolatası", 20, "adet")
         )
+
         stocks.forEach { stock ->
-            database.collection("chocolate_stocks").add(stock)
+            database.collection("stocks")
+                .whereEqualTo("name", stock.name)
+                .get()
+                .await()
+                .documents
+                .firstOrNull() ?: run {
+                database.collection("stocks").add(stock.toMap())
+            }
         }
     }
+}
+
+data class StockInfo(
+    val name: String,
+    val quantity: Int,
+    val unit: String
+) {
+    fun toMap() = mapOf(
+        "name" to name,
+        "quantity" to quantity,
+        "unit" to unit
+    )
+
+    override fun toString(): String = "$name: $quantity $unit"
+}
+
+data class ConversationData(
+    val query: String,
+    val response: String,
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    fun toMap() = mapOf(
+        "query" to query,
+        "response" to response,
+        "timestamp" to timestamp
+    )
 }
 
