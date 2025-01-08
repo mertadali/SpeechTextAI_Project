@@ -56,7 +56,7 @@ interface ChatGPTService {
     suspend fun submitToolOutputs(
         @Path("thread_id") threadId: String,
         @Path("run_id") runId: String,
-        @Body toolOutputs : Map<String, Any>
+        @Body toolOutputs: ToolOutputsRequest
     ): RunResponse
 
     @Streaming
@@ -182,7 +182,8 @@ data class RunResponse(
     val `object`: String,    val created_at: Long,
     val thread_id: String,
     val assistant_id: String,
-    val status: String
+    val status: String,
+    val required_action: RequiredAction? = null
 )
 
 data class TranscriptionResponse(
@@ -190,7 +191,37 @@ data class TranscriptionResponse(
 )
 
 data class RunRequest(
-    val assistant_id: String = ASSISTANT_ID
+    val assistant_id: String = ASSISTANT_ID,
+    val tools: List<Tool> = listOf(
+        Tool(
+            type = "function",
+            function = FunctionDefinition(
+                name = "get_stock_info",
+                description = "Ürünün stok bilgisini kontrol eder ve sesli yanıt verir",
+                parameters = mapOf(
+                    "type" to "object",
+                    "required" to listOf("product_name"),
+                    "properties" to mapOf(
+                        "product_name" to mapOf(
+                            "type" to "string",
+                            "description" to "Stok bilgisi sorgulanacak ürünün adı"
+                        )
+                    )
+                )
+            )
+        )
+    )
+)
+
+data class Tool(
+    val type: String,
+    val function: FunctionDefinition
+)
+
+data class FunctionDefinition(
+    val name: String,
+    val description: String,
+    val parameters: Map<String, Any>
 )
 
 data class MessagesResponse(
@@ -213,4 +244,35 @@ data class CreateThreadRequest(
 data class InitialMessage(
     val role: String = "user",
     val content: String = ""
+)
+
+data class RequiredAction(
+    val submit_tool_outputs: SubmitToolOutputs
+)
+
+data class SubmitToolOutputs(
+    val tool_calls: List<ToolCall>
+)
+
+data class ToolCall(
+    val id: String,
+    val function: FunctionCall
+)
+
+data class FunctionCall(
+    val name: String,
+    val arguments: String
+)
+
+data class ToolOutput(
+    val tool_call_id: String,
+    val output: String
+)
+
+data class ToolOutputsRequest(
+    val tool_outputs: List<ToolOutput>
+)
+
+data class StockQueryArgs(
+    val product_name: String
 )

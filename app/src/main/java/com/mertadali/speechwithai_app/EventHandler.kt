@@ -2,7 +2,6 @@ package com.mertadali.speechwithai_app.service
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import com.google.gson.Gson
 import com.mertadali.speechwithai_app.repository.FirebaseRepository
 
 class EventHandler(
