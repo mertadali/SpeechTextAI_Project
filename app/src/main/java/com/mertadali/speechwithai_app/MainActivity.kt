@@ -190,31 +190,44 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun processRecordedFile(file: File, threadId: String) {
-        // Ses dosyasını hazırla
-        val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
-        val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
+        try {
+            // 1. Ses dosyasını text'e çevir
+            val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
+            val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
+            val transcriptionResponse = chatGPTService.getTranscription(body)
+            val userMessage = transcriptionResponse.text
 
-        // Ses -> Metin dönüşümü
-        val transcriptionResponse = chatGPTService.getTranscription(body)
-        val userMessage = transcriptionResponse.text
+            // 2. Kullanıcıya geri bildirim
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "Soru: $userMessage", Toast.LENGTH_SHORT).show()
+            }
 
-        withContext(Dispatchers.Main) {
-            Toast.makeText(
-                this@MainActivity,
-                "Soru: $userMessage",
-                Toast.LENGTH_SHORT
-            ).show()
+            // 3. Thread'i yeniden kullan, sadece gerektiğinde yeni oluştur
+            val threadId = currentThreadId ?: createNewThreadAndWait()
+
+            // 4. Asistan yanıtını al
+            val aiResponse = processAssistantResponse(threadId, userMessage)
+
+            // 5. Yanıtı işle
+            withContext(Dispatchers.Main) {
+                if (aiResponse.isNotBlank()) {
+                    textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+
+                    // Firebase'e kaydetme işlemini arka planda yap
+                    mainScope.launch(Dispatchers.IO) {
+                        firebaseRepository.saveConversation(
+                            ConversationData(
+                                query = userMessage,
+                                response = aiResponse
+                            )
+                        )
+                    }
+                }
+            }
+        } finally {
+            // Temizlik
+            file.delete()
         }
-
-        // Assistant yanıtı al
-        val aiResponse = processAssistantResponse(threadId, userMessage)
-
-        withContext(Dispatchers.Main) {
-            handleAssistantResponse(userMessage, aiResponse)
-        }
-
-        // Temizlik
-        file.delete()
     }
 
     private fun handleAssistantResponse(userMessage: String, aiResponse: String) {
@@ -326,11 +339,17 @@ class MainActivity : ComponentActivity() {
     private fun initializeFirebase() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
+                println("Firebase stokları yükleniyor...") // Debug log
                 firebaseRepository.initializeStocks()
+                println("Firebase stokları başarıyla yüklendi") // Debug log
             } catch (e: Exception) {
+                println("Firebase başlatma hatası: ${e.message}") // Debug log
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Stok verisi yüklenemedi", Toast.LENGTH_SHORT)
-                        .show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Stok verisi yüklenemedi: ${e.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
         }
@@ -343,46 +362,40 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun processAssistantResponse(threadId: String, userMessage: String): String {
-        return try {
-            val eventHandler = EventHandler(chatGPTService, firebaseRepository)
+        try {
+            // Önce stok kontrolü yap
+            if (userMessage.lowercase().contains("kaç") || userMessage.lowercase().contains("stok")) {
+                println("Stok sorgusu tespit edildi: $userMessage") // Debug log
 
-            // 1. Kullanıcı mesajını gönder
-            chatGPTService.sendMessage(
-                threadId = threadId,
-                message = AssistantMessage(content = userMessage)
-            )
+                val productName = extractProductName(userMessage)
+                println("Çıkarılan ürün adı: $productName") // Debug log
 
-            // 2. Run başlat ve stream'i al
-            val responseBody = chatGPTService.streamRun(threadId)
-            val reader = responseBody.charStream().buffered()
-
-            // 3. Stream'den gelen verileri işle
-            withContext(Dispatchers.IO) {
-                reader.useLines { lines ->
-                    lines.forEach { line ->
-                        if (line.startsWith("data: ")) {
-                            val eventJson = line.substring(6)
-                            if (eventJson != "[DONE]") {
-                                try {
-                                    val event = parseEvent(eventJson)
-                                    eventHandler.handleEvent(event)
-                                } catch (e: Exception) {
-                                    println("Event parse hatası: ${e.message}")
-                                }
-                            }
-                        }
-                    }
+                if (productName.isNotEmpty()) {
+                    val quantity = firebaseRepository.getStockQuantity(productName)
+                    println("Stok miktarı: $quantity") // Debug log
+                    return "$productName ürününden $quantity adet bulunmaktadır."
                 }
             }
 
-            // 4. Son yanıtı al
-            eventHandler.responseFlow.value.ifEmpty {
-                throw Exception("Yanıt alınamadı")
+            // Eğer stok sorgusu değilse normal asistan yanıtı
+            chatGPTService.sendMessage(threadId, AssistantMessage(content = userMessage))
+            val runResponse = chatGPTService.createRun(threadId, RunRequest())
+
+            var run = chatGPTService.getRunStatus(threadId, runResponse.id)
+            while (run.status == "queued" || run.status == "in_progress") {
+                delay(1000)
+                run = chatGPTService.getRunStatus(threadId, runResponse.id)
             }
 
+            if (run.status == "completed") {
+                val messages = chatGPTService.getMessages(threadId)
+                return messages.data.firstOrNull()?.content?.firstOrNull()?.text?.value ?: ""
+            }
+
+            return "Üzgünüm, yanıt alınamadı."
         } catch (e: Exception) {
-            e.printStackTrace()
-            ""
+            println("Assistant Error: ${e.message}")
+            return "Bir hata oluştu: ${e.message}"
         }
     }
 
@@ -391,12 +404,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun extractProductName(message: String): String {
-        // Basit bir ürün adı çıkarma fonksiyonu
-        return message.lowercase()
-            .replace("kaç tane", "")
-            .replace("var", "")
-            .replace("?", "")
-            .trim()
+        val words = message.lowercase().split(" ")
+        var productName = ""
+
+        // "kaç" veya "stok" kelimesinden önceki kelimeyi al
+        for (i in words.indices) {
+            if (words[i] == "kaç" || words[i] == "stok") {
+                if (i > 0) {
+                    productName = words[i-1]
+                    break
+                }
+            }
+        }
+
+        println("Çıkarılan ürün adı: $productName") // Debug log
+        return productName
     }
 
     private fun createNewThread() {

@@ -1,62 +1,42 @@
 package com.mertadali.speechwithai_app.repository
 
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.google.firebase.Firebase
+import com.google.firebase.firestore.firestore
 
 class FirebaseRepository {
-    private val database = FirebaseFirestore.getInstance()
-
-    suspend fun getStockInfo(productName: String): StockInfo? {
-        return withContext(Dispatchers.IO) {
-            try {
-                val snapshot = database.collection("stocks")
-                    .whereEqualTo("name", productName.lowercase())
-                    .get()
-                    .await()
-
-                snapshot.documents.firstOrNull()?.let { doc ->
-                    StockInfo(
-                        name = doc.getString("name") ?: "",
-                        quantity = doc.getLong("quantity")?.toInt() ?: 0,
-                        unit = doc.getString("unit") ?: "adet"
-                    )
-                }
-            } catch (e: Exception) {
-                null
-            }
-        }
-    }
-
-    suspend fun saveConversation(conversation: ConversationData): Result<String> {
-        return withContext(Dispatchers.IO) {
-            try {
-                val documentRef = database.collection("conversations")
-                    .add(conversation.toMap())
-                    .await()
-                Result.success(documentRef.id)
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        }
-    }
+    private val db = Firebase.firestore
+    private var stocks: Map<String, Int> = emptyMap()
 
     suspend fun initializeStocks() {
-        val stocks = listOf(
-            StockInfo("a çikolatası", 15, "adet"),
-            StockInfo("b çikolatası", 20, "adet")
-        )
-
-        stocks.forEach { stock ->
-            database.collection("stocks")
-                .whereEqualTo("name", stock.name)
-                .get()
-                .await()
-                .documents
-                .firstOrNull() ?: run {
-                database.collection("stocks").add(stock.toMap())
+        try {
+            println("Stoklar yükleniyor...") // Debug log
+            val snapshot = db.collection("stocks").get().await()
+            stocks = snapshot.documents.associate { doc ->
+                doc.id to (doc.getLong("quantity")?.toInt() ?: 0)
             }
+            println("Yüklenen stoklar: $stocks") // Debug log
+        } catch (e: Exception) {
+            println("Stok yükleme hatası: ${e.message}")
+            throw e
+        }
+    }
+
+    fun getStockQuantity(productName: String): Int {
+        println("Stok sorgusu: $productName") // Debug log
+        val quantity = stocks[productName.lowercase()]
+        println("Bulunan miktar: $quantity") // Debug log
+        return quantity ?: 0
+    }
+
+    suspend fun saveConversation(conversationData: ConversationData) {
+        try {
+            db.collection("conversations")
+                .add(conversationData)
+                .await()
+        } catch (e: Exception) {
+            println("Konuşma kaydetme hatası: ${e.message}")
+            throw e
         }
     }
 }

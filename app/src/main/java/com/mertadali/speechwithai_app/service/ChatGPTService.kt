@@ -12,8 +12,7 @@ import java.util.concurrent.TimeUnit
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import kotlin.math.pow
-import kotlin.random.Random
+
 import com.google.gson.annotations.SerializedName
 
 interface ChatGPTService {
@@ -36,40 +35,42 @@ interface ChatGPTService {
         @Body message: AssistantMessage
     ): MessageResponse
 
-    @POST("v2/threads/{thread_id}/runs")
+    @POST("v1/threads/{thread_id}/runs")
     suspend fun createRun(
         @Path("thread_id") threadId: String,
         @Body runRequest: RunRequest
     ): RunResponse
 
-    @GET("v2/threads/{thread_id}/runs/{run_id}")
+    @GET("v1/threads/{thread_id}/runs/{run_id}")
     suspend fun getRunStatus(
         @Path("thread_id") threadId: String,
         @Path("run_id") runId: String
     ): RunResponse
 
-    @GET("v2/threads/{thread_id}/messages")
+    @GET("v1/threads/{thread_id}/messages")
     suspend fun getMessages(
         @Path("thread_id") threadId: String
     ): MessagesResponse
 
-    @POST("v2/threads/{thread_id}/runs/{run_id}/submit_tool_outputs")
+    @POST("v1/threads/{thread_id}/runs/{run_id}/submit_tool_outputs")
     suspend fun submitToolOutputs(
         @Path("thread_id") threadId: String,
         @Path("run_id") runId: String,
-        @Body toolOutputs: ToolOutputsRequest
+        @Body toolOutputs : Map<String, Any>
     ): RunResponse
 
     @Streaming
-    @GET("v2/threads/{thread_id}/runs/stream")
+    @GET("v1/threads/{thread_id}/runs/{run_id}/stream")
     suspend fun streamRun(
         @Path("thread_id") threadId: String,
+        @Path("run_id") runId: String,
         @Query("assistant_id") assistantId: String = ASSISTANT_ID
     ): okhttp3.ResponseBody
 
     companion object {
-        const val ASSISTANT_ID = "asst_ObhY59Uzf80z3SftkBgNDrwx"
+        const val ASSISTANT_ID = "asst_zPRFy1ptOOYobHC6RBs24nmQ"
         private var instance: ChatGPTService? = null
+        private var requestCounter = 0  // İstek sayacı ekle
 
         @Synchronized
         fun create(): ChatGPTService {
@@ -81,29 +82,57 @@ interface ChatGPTService {
                 val client = OkHttpClient.Builder()
                     .addInterceptor(loggingInterceptor)
                     .addInterceptor { chain ->
+                        requestCounter++  // Her istek için sayacı artır
                         val request = chain.request()
 
-                        // Request detaylarını logla
-                        println("Request URL: ${request.url}")
-                        println("Request Method: ${request.method}")
-                        println("Request Headers: ${request.headers}")
+                        // İstek detaylarını logla
+                        println("""
+                            ========== REQUEST #$requestCounter ==========
+                            URL: ${request.url}
+                            Method: ${request.method}
+                            Headers: ${request.headers}
+                            Body: ${request.body}
+                            Time: ${java.util.Date()}
+                            =======================================
+                        """.trimIndent())
 
                         val modifiedRequest = request.newBuilder()
                             .header("Authorization", "Bearer ${Constans.API_KEY}")
-                            .header("OpenAI-Beta", "assistants=v1")
+                            .header("OpenAI-Beta", "assistants=v2")
                             .build()
 
                         try {
                             val response = chain.proceed(modifiedRequest)
+
+                            // Yanıt detaylarını logla
+                            println("""
+                                ========== RESPONSE #$requestCounter ==========
+                                Status: ${response.code} ${response.message}
+                                Headers: ${response.headers}
+                                Time: ${java.util.Date()}
+                                =======================================
+                            """.trimIndent())
+
                             if (!response.isSuccessful) {
                                 val errorBody = response.peekBody(Long.MAX_VALUE).string()
-                                println("API Error: ${response.code} - $errorBody")
-                                println("Full Request URL: ${request.url}")
-                                println("Full Request Headers: ${request.headers}")
+                                println("""
+                                    ========== ERROR #$requestCounter ==========
+                                    Code: ${response.code}
+                                    Error Body: $errorBody
+                                    URL: ${request.url}
+                                    Headers: ${request.headers}
+                                    =======================================
+                                """.trimIndent())
                             }
                             response
                         } catch (e: Exception) {
-                            println("API Call Error: ${e.message}")
+                            println("""
+                                ========== EXCEPTION #$requestCounter ==========
+                                Error: ${e.message}
+                                Type: ${e.javaClass.simpleName}
+                                Stack Trace: ${e.stackTraceToString()}
+                                =======================================
+                            """.trimIndent())
                             throw e
                         }
                     }
@@ -126,8 +155,8 @@ interface ChatGPTService {
 
 // Data Classes
 data class AssistantMessage(
-    val role: String = "user",
-    val content: String
+    val content: String,
+    val role: String = "user"  // default değeri sona al
 )
 
 data class MessageResponse(
