@@ -46,6 +46,8 @@ import com.mertadali.speechwithai_app.service.FunctionDefinition
 import com.mertadali.speechwithai_app.service.ToolOutput
 import com.mertadali.speechwithai_app.service.ToolOutputsRequest
 import com.mertadali.speechwithai_app.service.StockQueryArgs
+import com.mertadali.speechwithai_app.service.ProcessVoiceInputArgs
+import com.mertadali.speechwithai_app.service.VoiceInput
 
 
 @Suppress("DEPRECATION")
@@ -171,7 +173,19 @@ class MainActivity : ComponentActivity() {
                             Toast.LENGTH_SHORT
                         ).show()
                     }
-                    createNewThreadAndWait()
+                    try {
+                        createNewThreadAndWait()
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            isProcessing = false
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Asistan başlatılamadı: ${e.message}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        return@launch
+                    }
                 }
 
                 currentRecordingFile?.let { file ->
@@ -181,6 +195,7 @@ class MainActivity : ComponentActivity() {
                         println("Ses işleme hatası: ${e.message}")
                         e.printStackTrace()
                         withContext(Dispatchers.Main) {
+                            isProcessing = false
                             Toast.makeText(
                                 this@MainActivity,
                                 "Ses işleme hatası: ${e.message}",
@@ -188,14 +203,26 @@ class MainActivity : ComponentActivity() {
                             ).show()
                         }
                     }
+                } ?: run {
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Ses dosyası oluşturulamadı",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
             } catch (e: Exception) {
                 handleError(e)
-            } finally {
                 withContext(Dispatchers.Main) {
-                    isProcessing = false // İşlem bittiğinde flag'i sıfırla
+                    isProcessing = false
                 }
-                currentRecordingFile?.delete() // Geçici dosyayı temizle
+            } finally {
+                currentRecordingFile?.delete()
+                withContext(Dispatchers.Main) {
+                    isProcessing = false  // Her durumda isProcessing'i sıfırla
+                }
             }
         }
     }
@@ -235,9 +262,29 @@ class MainActivity : ComponentActivity() {
             // 4. Yanıtı işle
             withContext(Dispatchers.Main) {
                 if (aiResponse.isNotBlank()) {
-                    textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+                    try {
+                        if (::textToSpeech.isInitialized) {
+                            textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+                        } else {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Ses motoru hazır değil, yanıt: $aiResponse",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } catch (e: Exception) {
+                        println("TextToSpeech hatası: ${e.message}")
+                        Toast.makeText(
+                            this@MainActivity,
+                            aiResponse,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
 
-                    // Firebase'e kaydet
+                    // İşlem tamamlandı, isProcessing'i sıfırla
+                    isProcessing = false
+
+                    // Firebase'e kaydet (arka planda)
                     mainScope.launch(Dispatchers.IO) {
                         try {
                             firebaseRepository.saveConversation(
@@ -256,39 +303,48 @@ class MainActivity : ComponentActivity() {
                         "Yanıt alınamadı",
                         Toast.LENGTH_SHORT
                     ).show()
+                    isProcessing = false
                 }
             }
         } catch (e: Exception) {
             println("Ses işleme hatası: ${e.message}")
             e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                isProcessing = false
+                Toast.makeText(
+                    this@MainActivity,
+                    "Hata: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
             throw e
         }
     }
-/*
-    private fun handleAssistantResponse(userMessage: String, aiResponse: String) {
-        if (aiResponse.isNotBlank()) {
-            // Sesli yanıt ver
-            textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+    /*
+        private fun handleAssistantResponse(userMessage: String, aiResponse: String) {
+            if (aiResponse.isNotBlank()) {
+                // Sesli yanıt ver
+                textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
 
-            // Firebase'e kaydet
-            mainScope.launch(Dispatchers.IO) {
-                firebaseRepository.saveConversation(
-                    ConversationData(
-                        query = userMessage,
-                        response = aiResponse
+                // Firebase'e kaydet
+                mainScope.launch(Dispatchers.IO) {
+                    firebaseRepository.saveConversation(
+                        ConversationData(
+                            query = userMessage,
+                            response = aiResponse
+                        )
                     )
-                )
+                }
+            } else {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Yanıt alınamadı",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
-        } else {
-            Toast.makeText(
-                this@MainActivity,
-                "Yanıt alınamadı",
-                Toast.LENGTH_SHORT
-            ).show()
         }
-    }
 
- */
+     */
 
     private suspend fun handleError(e: Exception) {
         withContext(Dispatchers.Main) {
@@ -409,31 +465,10 @@ class MainActivity : ComponentActivity() {
             // 1. Kullanıcı mesajını gönder
             chatGPTService.sendMessage(threadId, AssistantMessage(content = userMessage))
 
-            // 2. Function calling destekli run başlat
+            // 2. Run başlat
             val runResponse = chatGPTService.createRun(
                 threadId,
-                RunRequest(
-                    assistant_id = ChatGPTService.ASSISTANT_ID,
-                    tools = listOf(
-                        Tool(
-                            type = "function",
-                            function = FunctionDefinition(
-                                name = "get_stock_info",
-                                description = "Ürünün stok bilgisini kontrol eder",
-                                parameters = mapOf(
-                                    "type" to "object",
-                                    "properties" to mapOf(
-                                        "product_name" to mapOf(
-                                            "type" to "string",
-                                            "description" to "Stok bilgisi sorgulanacak ürünün adı"
-                                        )
-                                    ),
-                                    "required" to listOf("product_name")
-                                )
-                            )
-                        )
-                    )
-                )
+                RunRequest(assistant_id = ChatGPTService.ASSISTANT_ID)
             )
 
             // 3. Run durumunu kontrol et
@@ -448,6 +483,9 @@ class MainActivity : ComponentActivity() {
 
                 attempts++
                 if (attempts >= maxAttempts) {
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                    }
                     return "Yanıt zaman aşımına uğradı"
                 }
 
@@ -455,13 +493,13 @@ class MainActivity : ComponentActivity() {
                 if (run.status == "requires_action") {
                     val toolCalls = run.required_action?.submit_tool_outputs?.tool_calls
                     toolCalls?.forEach { toolCall ->
-                        if (toolCall.function.name == "get_stock_info") {
+                        if (toolCall.function.name == "check_stock") {
                             try {
+                                // Stok bilgisini sorgula
                                 val args = Gson().fromJson(toolCall.function.arguments, StockQueryArgs::class.java)
-                                println("Asistandan gelen ürün adı: ${args.product_name}")
-
-                                val stockQuantity = firebaseRepository.getStockQuantity(args.product_name)
-                                println("Stok sorgusu sonucu: ${args.product_name} = $stockQuantity")
+                                val productCode = args.product_code.uppercase() // Firebase'deki kodlar büyük harf
+                                val stockQuantity = firebaseRepository.getStockQuantity(productCode)
+                                println("Stok sorgusu sonucu: $productCode = $stockQuantity")
 
                                 chatGPTService.submitToolOutputs(
                                     threadId,
@@ -478,6 +516,9 @@ class MainActivity : ComponentActivity() {
                             } catch (e: Exception) {
                                 println("Tool output hatası: ${e.message}")
                                 e.printStackTrace()
+                                withContext(Dispatchers.Main) {
+                                    isProcessing = false
+                                }
                             }
                         }
                     }
@@ -492,40 +533,38 @@ class MainActivity : ComponentActivity() {
                 val messages = chatGPTService.getMessages(threadId)
                 messages.data.firstOrNull()?.content?.firstOrNull()?.text?.value ?: "Yanıt alınamadı"
             } else {
+                withContext(Dispatchers.Main) {
+                    isProcessing = false
+                }
                 "İşlem tamamlanamadı: ${run.status}"
             }
         } catch (e: Exception) {
             println("Asistan yanıt hatası: ${e.message}")
             e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                isProcessing = false
+            }
             "Bir hata oluştu: ${e.message}"
         }
     }
-    /*
 
-  private fun parseEvent(json: String): AssistantEvent {
-      return Gson().fromJson(json, AssistantEvent::class.java)
-  }
+    private fun extractProductName(message: String): String {
+        val words = message.lowercase().split(" ")
+        var productName = ""
 
+        // "kaç" veya "stok" kelimesinden önceki kelimeyi al
+        for (i in words.indices) {
+            if (words[i] == "kaç" || words[i] == "stok") {
+                if (i > 0) {
+                    productName = words[i-1]
+                    break
+                }
+            }
+        }
 
-  private fun extractProductName(message: String): String {
-      val words = message.lowercase().split(" ")
-      var productName = ""
-
-      // "kaç" veya "stok" kelimesinden önceki kelimeyi al
-      for (i in words.indices) {
-          if (words[i] == "kaç" || words[i] == "stok") {
-              if (i > 0) {
-                  productName = words[i-1]
-                  break
-              }
-          }
-      }
-
-      println("Çıkarılan ürün adı: $productName") // Debug log
-      return productName
-  }
-
-   */
+        println("Çıkarılan ürün adı: $productName") // Debug log
+        return productName.uppercase() // Firebase'deki stok kodları büyük harf
+    }
 
     private fun createNewThread() {
         mainScope.launch(Dispatchers.IO) {

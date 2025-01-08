@@ -70,7 +70,7 @@ interface ChatGPTService {
     companion object {
         const val ASSISTANT_ID = "asst_zPRFy1ptOOYobHC6RBs24nmQ"
         private var instance: ChatGPTService? = null
-        private var requestCounter = 0  // İstek sayacı ekle
+        private var requestCounter = 0  // İstek sayacı
 
         @Synchronized
         fun create(): ChatGPTService {
@@ -136,9 +136,9 @@ interface ChatGPTService {
                             throw e
                         }
                     }
-                    .connectTimeout(30, TimeUnit.SECONDS)
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .writeTimeout(30, TimeUnit.SECONDS)
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
                     .build()
 
                 instance = Retrofit.Builder()
@@ -196,17 +196,17 @@ data class RunRequest(
         Tool(
             type = "function",
             function = FunctionDefinition(
-                name = "get_stock_info",
-                description = "Ürünün stok bilgisini kontrol eder ve sesli yanıt verir",
+                name = "check_stock",
+                description = "Stok miktarını kontrol eder",
                 parameters = mapOf(
                     "type" to "object",
-                    "required" to listOf("product_name"),
                     "properties" to mapOf(
-                        "product_name" to mapOf(
+                        "product_code" to mapOf(
                             "type" to "string",
-                            "description" to "Stok bilgisi sorgulanacak ürünün adı"
+                            "description" to "Ürün kodu (örn: A, B, C)"
                         )
-                    )
+                    ),
+                    "required" to listOf("product_code")
                 )
             )
         )
@@ -274,5 +274,16 @@ data class ToolOutputsRequest(
 )
 
 data class StockQueryArgs(
-    val product_name: String
+    val product_code: String
+)
+
+data class ProcessVoiceInputArgs(
+    val voice_input: VoiceInput,
+    val product_folder: String,
+    val user_id: String,
+    val timestamp: String
+)
+
+data class VoiceInput(
+    val text: String
 )
