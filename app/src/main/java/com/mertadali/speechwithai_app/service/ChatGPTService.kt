@@ -12,6 +12,9 @@ import java.util.concurrent.TimeUnit
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import kotlin.math.pow
+import kotlin.random.Random
+import com.google.gson.annotations.SerializedName
 
 interface ChatGPTService {
     @Multipart
@@ -21,35 +24,48 @@ interface ChatGPTService {
         @Part("model") model: RequestBody = "whisper-1".toRequestBody("text/plain".toMediaType())
     ): TranscriptionResponse
 
+    @POST("v1/threads")
+    @Headers("Content-Type: application/json")
+    suspend fun createThread(
+        @Body request: CreateThreadRequest = CreateThreadRequest()
+    ): ThreadResponse
+
     @POST("v1/threads/{thread_id}/messages")
     suspend fun sendMessage(
         @Path("thread_id") threadId: String,
         @Body message: AssistantMessage
     ): MessageResponse
 
-    @POST("v1/threads/{thread_id}/runs")
+    @POST("v2/threads/{thread_id}/runs")
     suspend fun createRun(
         @Path("thread_id") threadId: String,
         @Body runRequest: RunRequest
     ): RunResponse
 
-    @GET("v1/threads/{thread_id}/runs/{run_id}")
+    @GET("v2/threads/{thread_id}/runs/{run_id}")
     suspend fun getRunStatus(
         @Path("thread_id") threadId: String,
         @Path("run_id") runId: String
     ): RunResponse
 
-    @GET("v1/threads/{thread_id}/messages")
+    @GET("v2/threads/{thread_id}/messages")
     suspend fun getMessages(
         @Path("thread_id") threadId: String
     ): MessagesResponse
 
-    @POST("v1/assistants/{assistant_id}/functions/{function_name}/invoke")
-    suspend fun invokeFunction(
-        @Path("assistant_id") assistantId: String,
-        @Path("function_name") functionName: String,
-        @Body parameters: Map<String, Any>
-    ): FunctionResponse
+    @POST("v2/threads/{thread_id}/runs/{run_id}/submit_tool_outputs")
+    suspend fun submitToolOutputs(
+        @Path("thread_id") threadId: String,
+        @Path("run_id") runId: String,
+        @Body toolOutputs: ToolOutputsRequest
+    ): RunResponse
+
+    @Streaming
+    @GET("v2/threads/{thread_id}/runs/stream")
+    suspend fun streamRun(
+        @Path("thread_id") threadId: String,
+        @Query("assistant_id") assistantId: String = ASSISTANT_ID
+    ): okhttp3.ResponseBody
 
     companion object {
         const val ASSISTANT_ID = "asst_ObhY59Uzf80z3SftkBgNDrwx"
@@ -59,30 +75,37 @@ interface ChatGPTService {
         fun create(): ChatGPTService {
             if (instance == null) {
                 val loggingInterceptor = HttpLoggingInterceptor().apply {
-                    level = HttpLoggingInterceptor.Level.BASIC
+                    level = HttpLoggingInterceptor.Level.BODY
                 }
 
                 val client = OkHttpClient.Builder()
                     .addInterceptor(loggingInterceptor)
                     .addInterceptor { chain ->
-                        val request = chain.request().newBuilder()
+                        val request = chain.request()
+
+                        // Request detaylarını logla
+                        println("Request URL: ${request.url}")
+                        println("Request Method: ${request.method}")
+                        println("Request Headers: ${request.headers}")
+
+                        val modifiedRequest = request.newBuilder()
                             .header("Authorization", "Bearer ${Constans.API_KEY}")
                             .header("OpenAI-Beta", "assistants=v1")
                             .build()
 
-                        var response = chain.proceed(request)
-                        var retryCount = 0
-
-                        // Exponential backoff
-                        while (!response.isSuccessful && response.code == 429 && retryCount < 3) {
-                            response.close()
-                            retryCount++
-                            val backoffTime = 1000L * (1 shl retryCount) // 2^retryCount seconds
-                            Thread.sleep(backoffTime)
-                            response = chain.proceed(request)
+                        try {
+                            val response = chain.proceed(modifiedRequest)
+                            if (!response.isSuccessful) {
+                                val errorBody = response.peekBody(Long.MAX_VALUE).string()
+                                println("API Error: ${response.code} - $errorBody")
+                                println("Full Request URL: ${request.url}")
+                                println("Full Request Headers: ${request.headers}")
+                            }
+                            response
+                        } catch (e: Exception) {
+                            println("API Call Error: ${e.message}")
+                            throw e
                         }
-
-                        response
                     }
                     .connectTimeout(30, TimeUnit.SECONDS)
                     .readTimeout(30, TimeUnit.SECONDS)
@@ -102,16 +125,63 @@ interface ChatGPTService {
 }
 
 // Data Classes
-data class AssistantMessage(val role: String = "user", val content: String)
-data class MessageResponse(val id: String, val thread_id: String, val content: List<MessageContent>)
-data class MessageContent(val type: String, val text: TextContent)
-data class TextContent(val value: String)
-data class RunResponse(val id: String, val status: String)
-data class TranscriptionResponse(val text: String)
-data class RunRequest(val assistant_id: String = ASSISTANT_ID)
-data class MessagesResponse(
-    val data: List<MessageResponse>
+data class AssistantMessage(
+    val role: String = "user",
+    val content: String
 )
-data class FunctionResponse(
-    val result: String
+
+data class MessageResponse(
+    val id: String,
+    val `object`: String,    val created_at: Long,
+    val thread_id: String,
+    val role: String,
+    val content: List<MessageContent>
+)
+
+data class MessageContent(
+    val type: String,
+    val text: TextContent
+)
+
+data class TextContent(
+    val value: String,
+    val annotations: List<Any> = emptyList()
+)
+
+data class RunResponse(
+    val id: String,
+    val `object`: String,    val created_at: Long,
+    val thread_id: String,
+    val assistant_id: String,
+    val status: String
+)
+
+data class TranscriptionResponse(
+    val text: String
+)
+
+data class RunRequest(
+    val assistant_id: String = ASSISTANT_ID
+)
+
+data class MessagesResponse(
+    val `object`: String,    val data: List<MessageResponse>,
+    val first_id: String,
+    val last_id: String,
+    val has_more: Boolean
+)
+
+data class ThreadResponse(
+    val id: String,
+    @SerializedName("object") val objectType: String,
+    val created_at: Long
+)
+
+data class CreateThreadRequest(
+    val messages: List<InitialMessage> = emptyList()
+)
+
+data class InitialMessage(
+    val role: String = "user",
+    val content: String = ""
 )

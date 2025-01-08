@@ -40,6 +40,9 @@ import com.mertadali.speechwithai_app.service.RunRequest
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.google.gson.Gson
+import com.mertadali.speechwithai_app.service.EventHandler
+import com.mertadali.speechwithai_app.service.AssistantEvent
 
 
 class MainActivity : ComponentActivity() {
@@ -51,17 +54,18 @@ class MainActivity : ComponentActivity() {
     private lateinit var textToSpeech: TextToSpeech
     private var isProcessing = false
 
-    // Sabit thread ID tanımlayalım
-    companion object {
-        private const val THREAD_ID = "thread_7kL9XyPVBGJHutAFZGgcKqWx" // OpenAI'dan aldığınız thread ID
-    }
+    private var currentThreadId: String? = null
+    private val threadLock = Object()
+
+    private val mainScope = lifecycleScope
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Google Play Services kontrolü
-        checkGooglePlayServices()
+        // Thread oluşturma işlemini başlat
+        createNewThread()
 
+        // Text-to-Speech ve Firebase'i başlat
         initTextToSpeech()
         initializeFirebase()
 
@@ -148,69 +152,174 @@ class MainActivity : ComponentActivity() {
         isProcessing = true
         audioRecorder.stopRecording()
 
-        currentRecordingFile?.let { file ->
-            lifecycleScope.launch(Dispatchers.IO) {
-                try {
-                    // Ses -> Metin
-                    val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
-                    val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
-                    val transcriptionResponse = chatGPTService.getTranscription(body)
-
-                    // Assistant yanıtı al
-                    val aiResponse = processAssistantResponse(THREAD_ID, transcriptionResponse.text)
-
-                    withContext(Dispatchers.Main) {
-                        // Sesli yanıt ver
-                        textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
-
-                        // Firebase'e kaydet
-                        firebaseRepository.saveConversation(
-                            ConversationData(
-                                query = transcriptionResponse.text,
-                                response = aiResponse
-                            )
-                        )
-                    }
-
-                    file.delete()
-                } catch (e: Exception) {
-                    e.printStackTrace()
+        mainScope.launch(Dispatchers.IO) {
+            try {
+                // Thread kontrolü
+                val threadId = currentThreadId ?: run {
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
                             this@MainActivity,
-                            "Hata: ${e.message}",
+                            "Asistan başlatılıyor...",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
-                } finally {
-                    isProcessing = false
+
+                    createNewThreadAndWait()
                 }
+
+                currentRecordingFile?.let { file ->
+                    processRecordedFile(file, threadId)
+                }
+            } catch (e: Exception) {
+                handleError(e)
+            } finally {
+                isProcessing = false
+            }
+        }
+    }
+
+    private suspend fun createNewThreadAndWait(): String {
+        createNewThread()
+        var attempts = 0
+        while (currentThreadId == null && attempts < 10) {
+            delay(500)
+            attempts++
+        }
+        return currentThreadId ?: throw Exception("Asistan başlatılamadı")
+
+    }
+
+    private suspend fun processRecordedFile(file: File, threadId: String) {
+        // Ses dosyasını hazırla
+        val requestFile = file.readBytes().toRequestBody("audio/*".toMediaType())
+        val body = MultipartBody.Part.createFormData("file", "audio.m4a", requestFile)
+
+        // Ses -> Metin dönüşümü
+        val transcriptionResponse = chatGPTService.getTranscription(body)
+        val userMessage = transcriptionResponse.text
+
+        withContext(Dispatchers.Main) {
+            Toast.makeText(
+                this@MainActivity,
+                "Soru: $userMessage",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        // Assistant yanıtı al
+        val aiResponse = processAssistantResponse(threadId, userMessage)
+
+        withContext(Dispatchers.Main) {
+            handleAssistantResponse(userMessage, aiResponse)
+        }
+
+        // Temizlik
+        file.delete()
+    }
+
+    private fun handleAssistantResponse(userMessage: String, aiResponse: String) {
+        if (aiResponse.isNotBlank()) {
+            // Sesli yanıt ver
+            textToSpeech.speak(aiResponse, TextToSpeech.QUEUE_FLUSH, null, null)
+
+            // Firebase'e kaydet
+            mainScope.launch(Dispatchers.IO) {
+                firebaseRepository.saveConversation(
+                    ConversationData(
+                        query = userMessage,
+                        response = aiResponse
+                    )
+                )
+            }
+        } else {
+            Toast.makeText(
+                this@MainActivity,
+                "Yanıt alınamadı",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private suspend fun handleError(e: Exception) {
+        withContext(Dispatchers.Main) {
+            Toast.makeText(
+                this@MainActivity,
+                "Hata: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+        e.printStackTrace()
+
+        // Hata durumunda thread'i sıfırla
+        if (e.message?.contains("thread", ignoreCase = true) == true) {
+            synchronized(threadLock) {
+                currentThreadId = null
+                createNewThread()
             }
         }
     }
 
     private fun checkPermission(): Boolean {
-        return if (ContextCompat.checkSelfPermission(
-                this,
-                android.Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
+        val permissions = arrayOf(
+            android.Manifest.permission.RECORD_AUDIO,
+            android.Manifest.permission.INTERNET,
+            android.Manifest.permission.ACCESS_NETWORK_STATE
+        )
+
+        val notGrantedPermissions = permissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        return if (notGrantedPermissions.isEmpty()) {
             true
         } else {
             ActivityCompat.requestPermissions(
                 this,
-                arrayOf(android.Manifest.permission.RECORD_AUDIO),
+                notGrantedPermissions.toTypedArray(),
                 1234
             )
             false
         }
     }
 
-    private fun checkGooglePlayServices() {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == 1234) {
+            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+                // İzinler verildi, kaydı başlat
+                startRecording()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Uygulama için gerekli izinler verilmedi",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun checkGooglePlayServices(): Boolean {
         val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
         val resultCode = availability.isGooglePlayServicesAvailable(this)
-        if (resultCode != com.google.android.gms.common.ConnectionResult.SUCCESS) {
-            availability.getErrorDialog(this, resultCode, 1)?.show()
+
+        return if (resultCode == com.google.android.gms.common.ConnectionResult.SUCCESS) {
+            true
+        } else {
+            if (availability.isUserResolvableError(resultCode)) {
+                availability.getErrorDialog(this, resultCode, 1)?.show()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Bu cihaz Google Play Services desteklemiyor",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            false
         }
     }
 
@@ -220,7 +329,8 @@ class MainActivity : ComponentActivity() {
                 firebaseRepository.initializeStocks()
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Stok verisi yüklenemedi", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Stok verisi yüklenemedi", Toast.LENGTH_SHORT)
+                        .show()
                 }
             }
         }
@@ -234,34 +344,90 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun processAssistantResponse(threadId: String, userMessage: String): String {
         return try {
-            // Mesajı gönder
+            val eventHandler = EventHandler(chatGPTService, firebaseRepository)
+
+            // 1. Kullanıcı mesajını gönder
             chatGPTService.sendMessage(
                 threadId = threadId,
                 message = AssistantMessage(content = userMessage)
             )
 
-            // Run başlat
-            val runResponse = chatGPTService.createRun(
-                threadId = threadId,
-                RunRequest()
-            )
+            // 2. Run başlat ve stream'i al
+            val responseBody = chatGPTService.streamRun(threadId)
+            val reader = responseBody.charStream().buffered()
 
-            // Run durumunu kontrol et
-            var status = runResponse.status
-            while (status != "completed") {
-                delay(1000)
-                status = chatGPTService.getRunStatus(threadId, runResponse.id).status
-                if (status == "failed") throw Exception("Assistant yanıt veremedi")
+            // 3. Stream'den gelen verileri işle
+            withContext(Dispatchers.IO) {
+                reader.useLines { lines ->
+                    lines.forEach { line ->
+                        if (line.startsWith("data: ")) {
+                            val eventJson = line.substring(6)
+                            if (eventJson != "[DONE]") {
+                                try {
+                                    val event = parseEvent(eventJson)
+                                    eventHandler.handleEvent(event)
+                                } catch (e: Exception) {
+                                    println("Event parse hatası: ${e.message}")
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            // Son mesajı al
-            chatGPTService.getMessages(threadId).data
-                .firstOrNull()?.content
-                ?.firstOrNull()?.text?.value
-                ?: "Yanıt alınamadı"
+            // 4. Son yanıtı al
+            eventHandler.responseFlow.value.ifEmpty {
+                throw Exception("Yanıt alınamadı")
+            }
 
         } catch (e: Exception) {
-            "Hata: ${e.message}"
+            e.printStackTrace()
+            ""
+        }
+    }
+
+    private fun parseEvent(json: String): AssistantEvent {
+        return Gson().fromJson(json, AssistantEvent::class.java)
+    }
+
+    private fun extractProductName(message: String): String {
+        // Basit bir ürün adı çıkarma fonksiyonu
+        return message.lowercase()
+            .replace("kaç tane", "")
+            .replace("var", "")
+            .replace("?", "")
+            .trim()
+    }
+
+    private fun createNewThread() {
+        mainScope.launch(Dispatchers.IO) {
+            try {
+                val threadResponse = chatGPTService.createThread()
+                synchronized(threadLock) {
+                    if (currentThreadId == null) {
+                        currentThreadId = threadResponse.id
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Asistan hazır",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+
+                withContext(Dispatchers.Main) {
+                    println(e.message)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Asistan başlatılamadı: ${e.message}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                delay(2000)
+                createNewThread()
+            }
         }
     }
 }
