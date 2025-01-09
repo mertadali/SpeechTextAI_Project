@@ -53,24 +53,24 @@ class FirebaseRepository {
         println("Bulunan miktar: $quantity")
         return quantity ?: 0
     }
-/*
-    suspend fun updateStock(productName: String, newQuantity: Int) {
-        try {
-            db.collection("stocks")
-                .document(productName)
-                .update("quantity", newQuantity)
-                .await()
+    /*
+        suspend fun updateStock(productName: String, newQuantity: Int) {
+            try {
+                db.collection("stocks")
+                    .document(productName)
+                    .update("quantity", newQuantity)
+                    .await()
 
-            stocks = stocks + (productName to newQuantity)
+                stocks = stocks + (productName to newQuantity)
 
-            println("Stok güncellendi: $productName = $newQuantity")
-        } catch (e: Exception) {
-            println("Stok güncelleme hatası: ${e.message}")
-            throw e
+                println("Stok güncellendi: $productName = $newQuantity")
+            } catch (e: Exception) {
+                println("Stok güncelleme hatası: ${e.message}")
+                throw e
+            }
         }
-    }
 
- */
+     */
 
     suspend fun saveConversation(conversationData: ConversationData) {
         try {
